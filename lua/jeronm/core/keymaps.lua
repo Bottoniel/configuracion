@@ -28,7 +28,10 @@ keymap.set("n", "<leader>tp", "<cmd>tabp<CR>", { desc = "Go to previos tab" })
 keymap.set("n", "<leader>tf", "<cmd>tabnew %<CR>", { desc = "Open current buffer in new tab" })
 
 --code lens
-vim.keymap.set("n", "<leader>cl", vim.lsp.codelens.run, { desc = "Run code lens" })
+-- vim.keymap.set("n", "<leader>cl", vim.lsp.codelens.run, { desc = "Run code lens" })
+vim.keymap.set("n", "<leader>cr", function()
+	vim.lsp.codelens.enable(true)
+end, { desc = "Refresh code len" })
 
 -- keymap.set("n", "<leader>sm", "<C-w>|<C-w>_", { desc = "maximizar ventana" })
 -- keymap.set("n", "<leader>sm", "<C-w>=", { desc = "minimizar ventana" })
