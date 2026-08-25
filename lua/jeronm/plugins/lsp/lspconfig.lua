@@ -60,7 +60,14 @@ return {
 				keymap.set("n", "K", vim.lsp.buf.hover, opts) -- show documentation for what is under cursor
 
 				opts.desc = "Restart LSP"
-				keymap.set("n", "<leader>rs", ":LspRestart<CR>", opts) -- mapping to restart lsp if necessary
+				-- keymap.set("n", "<leader>rs", ":LspRestart<CR>", opts) -- mapping to restart lsp if necessary
+				keymap.set("n", "<leader>rs", function()
+					local clients = vim.lsp.get_clients({ bufnr = vim.api.nvim_get_current_buf() })
+					for _, client in ipairs(clients) do
+						client.stop(client, true)
+					end
+					vim.cmd("edit")
+				end, opts)
 			end,
 		})
 

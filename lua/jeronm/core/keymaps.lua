@@ -27,6 +27,22 @@ keymap.set("n", "<leader>tn", "<cmd>tabn<CR>", { desc = "Go to next tab" })
 keymap.set("n", "<leader>tp", "<cmd>tabp<CR>", { desc = "Go to previos tab" })
 keymap.set("n", "<leader>tf", "<cmd>tabnew %<CR>", { desc = "Open current buffer in new tab" })
 
+--guardar un archivo que se abrio con to
+keymap.set("n", "<leader>ts", function()
+	vim.ui.input({ prompt = "Nombre del archivo: " }, function(name)
+		if not name or name == "" then
+			return
+		end
+		vim.ui.input({ prompt = "Ruta del directorio: ", default = vim.fn.getcwd() .. "/" }, function(dir)
+			if not dir or dir == "" then
+				return
+			end
+			local full = vim.fn.expand(dir .. "/" .. name)
+			vim.cmd("saveas " .. vim.fn.fnameescape(full))
+		end)
+	end)
+end, { desc = "Guardar buffer como..." })
+
 --code lens
 -- vim.keymap.set("n", "<leader>cl", vim.lsp.codelens.run, { desc = "Run code lens" })
 vim.keymap.set("n", "<leader>cr", function()

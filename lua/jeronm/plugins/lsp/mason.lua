@@ -51,6 +51,8 @@ return {
 				"stylua",
 				"black",
 				"clang-format",
+				"csharpier",
+				"netcoredbg",
 			},
 		})
 	end,
