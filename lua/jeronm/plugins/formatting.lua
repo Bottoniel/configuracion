@@ -23,11 +23,13 @@ return {
 				python = { "isort", "black" },
 				cs = { "csharpier" },
 			},
-			format_on_save = {
-				lsp_fallback = true,
-				async = false,
-				timeout_ms = 3000,
-			},
+			format_on_save = function(bufnr)
+				-- no reformatear T-SQL al guardar; usar <leader>mp manualmente
+				if vim.bo[bufnr].filetype == "sql" then
+					return
+				end
+				return { lsp_fallback = true, async = false, timeout_ms = 3000 }
+			end,
 		})
 
 		vim.keymap.set({ "n", "v" }, "<leader>mp", function()

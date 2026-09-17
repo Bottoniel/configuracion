@@ -30,11 +30,6 @@ return {
 	init = function()
 		vim.lsp.config("roslyn", {
 			capabilities = {
-				workspace = {
-					didChangeWatchedFiles = {
-						dynamicRegistration = true,
-					},
-				},
 				textDocument = {
 					diagnostic = {
 						dynamicRegistration = true,
@@ -59,7 +54,7 @@ return {
 	end,
 
 	opts = {
-		filewatching = "auto",
+		filewatching = "roslyn",
 		lock_target = false,
 	},
 }

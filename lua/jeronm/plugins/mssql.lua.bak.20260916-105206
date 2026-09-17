@@ -1,0 +1,382 @@
+return {
+	"Kurren123/mssql.nvim",
+	-- carga nvim-lspconfig (y con él cmp-nvim-lsp y las capabilities) antes que mssql.nvim;
+	-- sin esto, en una query nueva (<leader>mn) nvim-cmp no tiene fuente LSP y no hay autocompletado
+	dependencies = { "neovim/nvim-lspconfig" },
+	config = function()
+		local utils = require("mssql.utils")
+
+		-- Panel de resultados estilo SSMS, uno por pestaña: abajo, 40% de alto, un conjunto debajo de otro.
+		-- mssql.nvim borra sus buffers de resultados en cada ejecución (de cualquier pestaña), así que cada
+		-- pestaña guarda copias propias.
+		local panels = {} -- [tabpage] = { bufs = copias, wins = ventanas, sources = buffers del plugin, editor_win }
+
+		local function panel_of(tab)
+			tab = tab or vim.api.nvim_get_current_tabpage()
+			panels[tab] = panels[tab] or { bufs = {}, wins = {}, sources = {} }
+			return panels[tab]
+		end
+
+		local function panel_wins(panel)
+			panel.wins = vim.tbl_filter(vim.api.nvim_win_is_valid, panel.wins)
+			return panel.wins
+		end
+
+		-- reparte el 40% de la pantalla entre los conjuntos; winfixheight evita que crezca al reabrir
+		local function arrange_panel(panel)
+			local wins = panel_wins(panel)
+			local height = math.max(3, math.floor(vim.o.lines * 0.4 / math.max(#wins, 1)))
+			for _, win in ipairs(wins) do
+				vim.wo[win].winfixheight = false
+				vim.api.nvim_win_set_height(win, height)
+				vim.wo[win].winfixheight = true
+			end
+		end
+
+		-- abre bufnr en el panel (la pestaña del panel debe ser la actual)
+		local function show_in_panel(panel, bufnr)
+			local wins = panel_wins(panel)
+			if #wins == 0 then
+				vim.cmd("botright split")
+			else
+				vim.api.nvim_set_current_win(wins[#wins])
+				vim.cmd("belowright split")
+			end
+			local win = vim.api.nvim_get_current_win()
+			vim.api.nvim_win_set_buf(win, bufnr)
+			vim.wo[win].wrap = false
+			vim.wo[win].cursorline = true
+			table.insert(panel.wins, win)
+			arrange_panel(panel)
+		end
+
+		local function show_panel(panel)
+			panel.bufs = vim.tbl_filter(vim.api.nvim_buf_is_valid, panel.bufs)
+			if #panel.bufs == 0 then
+				vim.notify("No hay resultados todavía", vim.log.levels.INFO)
+				return false
+			end
+			local current_win = vim.api.nvim_get_current_win()
+			for _, bufnr in ipairs(panel.bufs) do
+				show_in_panel(panel, bufnr)
+			end
+			vim.api.nvim_set_current_win(current_win)
+			return true
+		end
+
+		local function hide_panel(panel)
+			local was_inside = vim.tbl_contains(panel_wins(panel), vim.api.nvim_get_current_win())
+			for _, win in ipairs(panel_wins(panel)) do
+				pcall(vim.api.nvim_win_close, win, false)
+			end
+			panel.wins = {}
+			if was_inside and panel.editor_win and vim.api.nvim_win_is_valid(panel.editor_win) then
+				vim.api.nvim_set_current_win(panel.editor_win)
+			end
+		end
+
+		local function clear_panel(panel)
+			hide_panel(panel)
+			for _, bufnr in ipairs(panel.bufs) do
+				if vim.api.nvim_buf_is_valid(bufnr) then
+					vim.api.nvim_buf_delete(bufnr, { force = true })
+				end
+			end
+			panel.bufs, panel.sources, panel.pending = {}, {}, false
+		end
+
+		local function toggle_panel()
+			local panel = panel_of()
+			if #panel_wins(panel) > 0 then
+				hide_panel(panel)
+			else
+				show_panel(panel)
+			end
+		end
+
+		-- F6: saltar entre el editor SQL y el panel (si está oculto, lo abre)
+		local function switch_focus()
+			local panel = panel_of()
+			if vim.tbl_contains(panel_wins(panel), vim.api.nvim_get_current_win()) then
+				if panel.editor_win and vim.api.nvim_win_is_valid(panel.editor_win) then
+					vim.api.nvim_set_current_win(panel.editor_win)
+				end
+			elseif #panel_wins(panel) > 0 or show_panel(panel) then
+				vim.api.nvim_set_current_win(panel_wins(panel)[1])
+			end
+		end
+
+		-- F5: como SSMS, limpia los resultados de esta pestaña y ejecuta la selección o el archivo
+		local function execute()
+			local panel = panel_of()
+			if vim.tbl_contains(panel_wins(panel), vim.api.nvim_get_current_win()) then
+				if not (panel.editor_win and vim.api.nvim_win_is_valid(panel.editor_win)) then
+					return
+				end
+				vim.api.nvim_set_current_win(panel.editor_win)
+			end
+			clear_panel(panel)
+			require("mssql").execute_query()
+		end
+
+		-- pestaña donde está abierto el buffer SQL que lanzó la consulta (la actual si lo contiene)
+		local function tab_of_owner(owner_uri)
+			local current = vim.api.nvim_get_current_tabpage()
+			local found
+			for _, tab in ipairs(vim.api.nvim_list_tabpages()) do
+				for _, win in ipairs(vim.api.nvim_tabpage_list_wins(tab)) do
+					if utils.lsp_file_uri(vim.api.nvim_win_get_buf(win)) == owner_uri then
+						if tab == current then
+							return tab
+						end
+						found = found or tab
+					end
+				end
+			end
+			return found or current
+		end
+
+		-- mssql.nvim llama a esto por cada conjunto de resultados
+		local function open_results(source)
+			local info = vim.b[source].query_result_info
+			local tab = info and tab_of_owner(info.subset_params.ownerUri) or vim.api.nvim_get_current_tabpage()
+			local panel = panel_of(tab)
+
+			-- si los buffers del plugin de la ejecución anterior ya no existen, esta es una ejecución nueva
+			if #panel.sources > 0 and #vim.tbl_filter(vim.api.nvim_buf_is_valid, panel.sources) == 0 then
+				clear_panel(panel)
+			end
+
+			local copy = vim.api.nvim_create_buf(false, true)
+			vim.api.nvim_buf_set_lines(copy, 0, -1, false, vim.api.nvim_buf_get_lines(source, 0, -1, false))
+			vim.bo[copy].modifiable = false
+			vim.b[copy].query_result_info = info -- para <leader>ms (guardar resultados)
+			if info then
+				local p = info.subset_params
+				pcall(vim.api.nvim_buf_set_name, copy, ("resultados %d-%d [%d]"):format(p.batchIndex + 1, p.resultSetIndex + 1, copy))
+			end
+			local filetype = vim.bo[source].filetype
+			vim.api.nvim_buf_call(copy, function()
+				vim.bo.filetype = filetype
+			end)
+			local function map(lhs, rhs, desc)
+				vim.keymap.set("n", lhs, rhs, { buffer = copy, desc = desc })
+			end
+			map("q", function()
+				hide_panel(panel_of())
+			end, "Ocultar resultados")
+			map("<C-r>", toggle_panel, "Mostrar/ocultar resultados")
+			map("<F6>", switch_focus, "Ir al editor SQL")
+			map("<F5>", execute, "Ejecutar la query del editor")
+
+			table.insert(panel.sources, source)
+			table.insert(panel.bufs, copy)
+			if tab == vim.api.nvim_get_current_tabpage() then
+				local current_win = vim.api.nvim_get_current_win()
+				show_in_panel(panel, copy)
+				vim.api.nvim_set_current_win(current_win)
+			else
+				panel.pending = true -- se muestra al volver a esa pestaña
+			end
+		end
+
+		require("mssql").setup({
+			keymap_prefix = "<leader>m",
+			-- el servicio que descarga el plugin (5.0.20250530.2) devuelve sugerencias desfasadas
+			tools_file = vim.fn.stdpath("data") .. "/mssql.nvim/sqltools-6.0.20260911.1/MicrosoftSqlToolsServiceLayer",
+			max_rows = 1000,
+			max_column_width = 50,
+			open_results_in = open_results,
+		})
+
+		vim.keymap.set({ "n", "x" }, "<Plug>(MssqlRun)", execute, { desc = "Ejecutar selección o archivo" })
+		-- reemplaza el <leader>mx del plugin para que también limpie los resultados de la pestaña
+		vim.keymap.set({ "n", "v" }, "<leader>mx", execute, { desc = "Execute Query" })
+		vim.keymap.set("n", "<leader>mt", toggle_panel, { desc = "Mostrar/ocultar resultados" })
+
+		vim.api.nvim_create_autocmd({ "BufEnter", "WinEnter" }, {
+			callback = function()
+				if vim.bo.filetype == "sql" then
+					panel_of().editor_win = vim.api.nvim_get_current_win()
+				end
+			end,
+		})
+
+		-- resultados que llegaron mientras estabas en otra pestaña
+		vim.api.nvim_create_autocmd("TabEnter", {
+			callback = function()
+				local panel = panel_of()
+				if panel.pending then
+					panel.pending = false
+					vim.schedule(function()
+						hide_panel(panel)
+						show_panel(panel)
+					end)
+				end
+			end,
+		})
+
+		vim.api.nvim_create_autocmd("TabClosed", {
+			callback = function()
+				for tab, panel in pairs(panels) do
+					if not vim.api.nvim_tabpage_is_valid(tab) then
+						for _, bufnr in ipairs(panel.bufs) do
+							if vim.api.nvim_buf_is_valid(bufnr) then
+								vim.api.nvim_buf_delete(bufnr, { force = true })
+							end
+						end
+						panels[tab] = nil
+					end
+				end
+			end,
+		})
+
+		-- las queries nuevas (<leader>mn, <leader>md y <leader>mf) se abren en su propia pestaña;
+		-- el plugin crea el buffer con :enew y lo nombra untitled-N.sql en la ventana actual
+		vim.api.nvim_create_autocmd("BufFilePost", {
+			pattern = "untitled-*.sql",
+			callback = function(ev)
+				local previous = vim.fn.bufnr("#")
+				local fresh = vim.api.nvim_buf_line_count(ev.buf) == 1
+					and vim.api.nvim_buf_get_lines(ev.buf, 0, 1, false)[1] == ""
+				if not fresh or previous == -1 or previous == ev.buf or not vim.api.nvim_buf_is_valid(previous) then
+					return
+				end
+				-- desde el dashboard o un buffer vacío sin nombre, la query se queda en la pestaña actual
+				if
+					vim.bo[previous].filetype == "alpha"
+					or (vim.api.nvim_buf_get_name(previous) == "" and not vim.bo[previous].modified)
+				then
+					return
+				end
+				vim.api.nvim_win_set_buf(0, previous)
+				vim.cmd("tab sbuffer " .. ev.buf)
+			end,
+		})
+
+		vim.api.nvim_create_autocmd("FileType", {
+			pattern = "sql",
+			callback = function(ev)
+				local function map(mode, lhs, rhs, desc, remap)
+					vim.keymap.set(mode, lhs, rhs, { buffer = ev.buf, desc = desc, remap = remap })
+				end
+				-- <leader>mm ejecuta el bloque bajo el cursor (delimitado por líneas en blanco)
+				map("n", "<leader>mm", "vip<Plug>(MssqlRun)", "Ejecutar bloque SQL bajo el cursor", true)
+				-- atajos estilo SSMS
+				map({ "n", "x" }, "<F5>", execute, "Ejecutar selección o archivo")
+				map("i", "<F5>", "<Esc><Plug>(MssqlRun)", "Ejecutar archivo", true)
+				map("n", "<C-r>", toggle_panel, "Mostrar/ocultar resultados")
+				map("n", "<F6>", switch_focus, "Cambiar foco editor/resultados")
+			end,
+		})
+
+		-- SQL Tools Service responde completionItem/resolve con "command": null. En Lua eso llega como
+		-- vim.NIL (que es verdadero), cmp-nvim-lsp manda workspace/executeCommand, el servidor nunca
+		-- contesta y nvim-cmp se queda suspendido: el autocompletado deja de salir tras aceptar la
+		-- primera sugerencia. Quitamos esos null antes de que lleguen a nvim-cmp.
+		vim.api.nvim_create_autocmd("LspAttach", {
+			callback = function(ev)
+				local client = vim.lsp.get_client_by_id(ev.data.client_id)
+				if not client or client.name ~= "mssql_ls" or client._mssql_resolve_patch then
+					return
+				end
+				client._mssql_resolve_patch = true
+				local request = client.request
+				client.request = function(self, method, params, handler, bufnr)
+					if method == "completionItem/resolve" and handler then
+						local original = handler
+						handler = function(err, result, ctx, config)
+							if type(result) == "table" then
+								for key, value in pairs(result) do
+									if value == vim.NIL then
+										result[key] = nil
+									end
+								end
+							end
+							return original(err, result, ctx, config)
+						end
+					end
+					return request(self, method, params, handler, bufnr)
+				end
+			end,
+		})
+
+		-- mssql.nvim renombra el buffer al guardar una query nueva (`:w ruta/nombre.sql`): su autocmd
+		-- AutoNameSQL hace `:file` dentro de BufWritePost y Vim no dispara BufFilePre/Post desde dentro
+		-- de otro autocmd, así que hay que vigilar BufWritePost además de BufFilePost.
+		-- El query_manager guarda el ownerUri del momento en que se creó (query_manager.lua:33) mientras
+		-- que wait_for_notification_async lo recalcula con el nombre nuevo (utils.lua:168): query/complete
+		-- nunca coincide, la ejecución se queda "Executing..." hasta el timeout de 6 minutos y no salen
+		-- resultados. Aquí reabrimos el documento con el nombre nuevo, recreamos el query_manager y
+		-- reconectamos con los mismos parámetros.
+		local function track_owner_uri(buf)
+			vim.b[buf].mssql_owner_uri = require("mssql.utils").lsp_file_uri(buf)
+		end
+
+		local function recover_from_rename(buf)
+			if vim.bo[buf].filetype ~= "sql" then
+				return
+			end
+			local utils = require("mssql.utils")
+			local old_uri = vim.b[buf].mssql_owner_uri
+			local new_uri = utils.lsp_file_uri(buf)
+			if not old_uri or old_uri == new_uri then
+				return
+			end
+			track_owner_uri(buf)
+
+			local client = vim.lsp.get_clients({ name = "mssql_ls", bufnr = buf })[1]
+			if not client then
+				return
+			end
+
+			local query_manager = require("mssql.query_manager")
+			local old_qm = vim.b[buf].query_manager
+			local params = (old_qm and old_qm.get_connect_params()) or {}
+			local was_connected = old_qm ~= nil and old_qm.get_state() ~= query_manager.states.Disconnected
+
+			if was_connected then
+				-- la conexión del nombre viejo se quedaría abierta en el servicio hasta cerrar Neovim
+				client:request("connection/disconnect", { ownerUri = old_uri }, function() end)
+			end
+
+			if old_qm then
+				vim.b[buf].query_manager = query_manager.create_query_manager(buf, client)
+			end
+			local qm = vim.b[buf].query_manager
+
+			client:notify("textDocument/didClose", { textDocument = { uri = old_uri } })
+			client:notify("textDocument/didOpen", {
+				textDocument = {
+					uri = new_uri,
+					languageId = "sql",
+					version = 0,
+					text = table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), "\n"),
+				},
+			})
+
+			if not (qm and was_connected and params.connection) then
+				return
+			end
+			utils.try_resume(coroutine.create(function()
+				qm.connect_async(params)
+				qm.initialise_cache_async()
+				utils.log_info("mssql.nvim: reconectado tras renombrar el buffer")
+			end))
+		end
+
+		vim.api.nvim_create_autocmd("FileType", {
+			pattern = "sql",
+			callback = function(ev)
+				track_owner_uri(ev.buf)
+			end,
+		})
+
+		vim.api.nvim_create_autocmd({ "BufFilePost", "BufWritePost" }, {
+			desc = "mssql_recover_rename",
+			callback = function(ev)
+				recover_from_rename(ev.buf)
+			end,
+		})
+	end,
+}

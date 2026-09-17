@@ -61,5 +61,17 @@ return {
 				}),
 			},
 		})
+
+		-- en SQL, primero las sugerencias del servidor (IntelliSense); snippets y palabras del buffer
+		-- solo aparecen cuando el servidor no sugiere nada
+		cmp.setup.filetype("sql", {
+			sources = cmp.config.sources({
+				{ name = "nvim_lsp" },
+			}, {
+				{ name = "luasnip" },
+				{ name = "buffer" },
+				{ name = "path" },
+			}),
+		})
 	end,
 }

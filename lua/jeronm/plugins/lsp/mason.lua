@@ -40,9 +40,8 @@ return {
 				"rust_analyzer",
 				"eslint",
 				"clangd",
-				"sqls",
 			},
-			automatic_enable = true,
+			automatic_enable = { exclude = { "sqls" } },
 		})
 
 		mason_tool_installer.setup({

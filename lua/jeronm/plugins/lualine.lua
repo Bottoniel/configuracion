@@ -1,6 +1,6 @@
 return {
   "nvim-lualine/lualine.nvim",
-  dependencies = { "nvim-tree/nvim-web-devicons" },
+  dependencies = { "nvim-tree/nvim-web-devicons", "Kurren123/mssql.nvim" },
   config = function()
     local lualine = require("lualine")
     local lazy_status = require("lazy.status") -- to configure lazy pending updates count
@@ -55,6 +55,7 @@ return {
         theme = my_lualine_theme,
       },
       sections = {
+        lualine_c = { "filename", require("mssql").lualine_component },
         lualine_x = {
           {
             lazy_status.updates,

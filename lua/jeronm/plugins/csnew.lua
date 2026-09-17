@@ -18,6 +18,8 @@ return {
 		"CsWatch",
 		"CsStop",
 		"CsDebugRun",
+		"CsDebugAttach",
+		"CsDebugStop",
 		"EfMigrate",
 		"EfUpdate",
 		"EfRemove",
@@ -34,5 +36,7 @@ return {
 			desc = "New C# type",
 		},
 	},
-	opts = {},
+	opts = {
+		dap = { keymaps = "<leader>d" },
+	},
 }
